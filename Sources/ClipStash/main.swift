@@ -66,6 +66,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if !Prefs.welcomed { showWelcome() }
     }
 
+    func applicationWillTerminate(_ note: Notification) {
+        state?.commitDelete()
+    }
+
     @discardableResult
     private func registerOpenKey() -> Bool {
         let k = Prefs.hotKey
@@ -77,7 +81,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func applyPrefs() {
         Prefs.applyTheme()
         screenshots.setEnabled(Prefs.saveScreenshots && !Prefs.paused)
-        statusItem.button?.appearsDisabled = Prefs.paused
+        let symbol = Prefs.paused ? "pause.circle" : "doc.on.clipboard"
+        let image = NSImage(systemSymbolName: symbol, accessibilityDescription: Prefs.paused ? "ClipStash (paused)" : "ClipStash")
+        image?.isTemplate = true
+        statusItem.button?.image = image
         let limits = (Prefs.maxClips, Prefs.storageBytes)
         if lastLimits.map({ $0 != limits }) ?? true {
             lastLimits = limits
@@ -90,9 +97,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func setupStatusItem() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
-        let image = NSImage(systemSymbolName: "doc.on.clipboard", accessibilityDescription: "ClipStash")
-        image?.isTemplate = true
-        statusItem.button?.image = image
         let menu = NSMenu()
         menu.delegate = self
         statusItem.menu = menu
@@ -167,6 +171,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         window.makeKeyAndOrderFront(nil)
     }
 }
+
+#if DEBUG
+if let i = CommandLine.arguments.firstIndex(of: "--snapshot"), i + 1 < CommandLine.arguments.count {
+    Snapshots.run(to: URL(fileURLWithPath: CommandLine.arguments[i + 1]))
+}
+#endif
 
 let app = NSApplication.shared
 let delegate = AppDelegate()

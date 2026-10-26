@@ -3,7 +3,7 @@ import ClipCore
 import ImageIO
 import SwiftUI
 
-private let accent = Color(red: 0.36, green: 0.36, blue: 0.94)
+private let accent = Color.accentColor
 
 struct PanelView: View {
     @ObservedObject var state: AppState
@@ -26,6 +26,7 @@ struct PanelView: View {
                 }
                 Button { state.openSettings() } label: { Image(systemName: "gearshape") }
                     .buttonStyle(.plain).foregroundStyle(.secondary).help("Settings (⌘,)")
+                    .accessibilityLabel("Settings")
             }
             .padding(.horizontal, 14).padding(.top, 14).padding(.bottom, 8)
 
@@ -33,20 +34,25 @@ struct PanelView: View {
                 ForEach(ClipFilter.allCases, id: \.self) { f in
                     Button(f.rawValue) { state.filter = f }
                         .buttonStyle(PillStyle(selected: state.filter == f))
+                        .help("\(f.rawValue) (⌘\(ClipFilter.allCases.firstIndex(of: f)! + 1))")
+                        .accessibilityAddTraits(state.filter == f ? .isSelected : [])
                 }
                 Spacer()
             }
             .padding(.horizontal, 12).padding(.bottom, 8)
 
             Divider()
-            HStack(spacing: 0) {
-                ClipList(state: state).frame(width: 470)
-                Divider()
-                if let clip = state.selected {
-                    DetailView(state: state, clip: clip, focus: $focus).id(clip.id)
-                } else {
-                    Text(state.query.isEmpty ? "Copy something to get started" : "No matches")
-                        .foregroundStyle(.secondary).frame(maxWidth: .infinity, maxHeight: .infinity)
+            if state.clips.isEmpty {
+                EmptyState(state: state).frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                HStack(spacing: 0) {
+                    ClipList(state: state).frame(width: 470)
+                    Divider()
+                    if let clip = state.selected {
+                        DetailView(state: state, clip: clip, focus: $focus).id(clip.id)
+                    } else {
+                        Spacer().frame(maxWidth: .infinity)
+                    }
                 }
             }
             Divider()
@@ -78,6 +84,9 @@ private struct ClipList: View {
                                 state.selectedID = clip.id
                             }
                             .contextMenu { ClipMenu(state: state, clip: clip) }
+                            .accessibilityElement(children: .combine)
+                            .accessibilityAddTraits(.isButton)
+                            .accessibilityHint("Pastes into the app you were using")
                     }
                 }
                 .padding(6)
@@ -179,12 +188,19 @@ private struct DetailView: View {
             ScrollView { preview.frame(maxWidth: .infinity, alignment: .topLeading).padding(12) }
             Divider()
             VStack(alignment: .leading, spacing: 7) {
-                TextField("Add a name…", text: $name)
-                    .textFieldStyle(.plain).font(.system(size: 12, weight: .medium))
-                    .focused(focus, equals: .rename)
-                    .onSubmit { state.rename(clip, to: name); focus.wrappedValue = .search }
+                HStack(spacing: 6) {
+                    Image(systemName: "pencil").font(.system(size: 10, weight: .semibold)).foregroundStyle(.tertiary)
+                    TextField("Name this clip (⌘R)", text: $name)
+                        .textFieldStyle(.plain).font(.system(size: 12, weight: .medium))
+                        .focused(focus, equals: .rename)
+                        .onSubmit { state.rename(clip, to: name); focus.wrappedValue = .search }
+                        .accessibilityLabel("Clip name")
+                }
+                .padding(.horizontal, 7).padding(.vertical, 5)
+                .background(Color.primary.opacity(focus.wrappedValue == .rename ? 0.07 : 0.035), in: RoundedRectangle(cornerRadius: 6))
                 row(clip.kind.label, ByteCountFormatter.string(fromByteCount: Int64(clip.size), countStyle: .file))
                 row(clip.app ?? "Unknown app", ago(clip.created, state.now) ?? "")
+                    .help(clip.created.formatted(date: .complete, time: .standard))
                 HStack {
                     Label("Delete after", systemImage: "timer").font(.system(size: 11)).foregroundStyle(.secondary)
                     Spacer()
@@ -218,6 +234,9 @@ private struct DetailView: View {
                         Image(nsImage: Thumbs.fileIcon(path)).resizable().frame(width: 18, height: 18)
                         VStack(alignment: .leading) {
                             Text((path as NSString).lastPathComponent).font(.system(size: 12))
+                            if !FileManager.default.fileExists(atPath: path) {
+                                Text("Moved or deleted").font(.system(size: 10, weight: .medium)).foregroundStyle(.orange)
+                            }
                             Text(path).font(.system(size: 10)).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
                         }
                     }
@@ -226,7 +245,8 @@ private struct DetailView: View {
         } else {
             let text = clip.text ?? ""
             // Huge clips stay fully pasteable; only the preview is trimmed to keep the panel instant.
-            Text(text.count > 20_000 ? String(text.prefix(20_000)) + "\n…" : text)
+            // utf8.count is O(1); count would walk a multi-MB clip on every render.
+            Text(text.utf8.count > 20_000 ? String(text.prefix(20_000)) + "\n…" : text)
                 .font(clip.kind == .code ? .system(size: 12, design: .monospaced) : .system(size: 12.5))
                 .textSelection(.enabled)
         }
@@ -297,6 +317,29 @@ private struct TimerBadge: View {
     }
 }
 
+private struct EmptyState: View {
+    @ObservedObject var state: AppState
+
+    var body: some View {
+        let (icon, title, detail): (String, String, String) =
+            if state.total == 0 {
+                ("doc.on.clipboard", "Nothing copied yet", "Copy text, links, images or files in any app. They show up here.")
+            } else if !state.query.isEmpty {
+                ("magnifyingglass", "No matches", "Nothing in \(state.filter == .all ? "your history" : state.filter.rawValue) matches “\(state.query)”.")
+            } else if state.filter == .favorites {
+                ("star", "No pinned clips", "Press ⌘P on a clip to keep it here forever.")
+            } else {
+                ("tray", "No \(state.filter.rawValue.lowercased()) yet", "Copied \(state.filter.rawValue.lowercased()) will show up here.")
+            }
+        VStack(spacing: 6) {
+            Image(systemName: icon).font(.system(size: 22, weight: .light)).foregroundStyle(.tertiary).padding(.bottom, 4)
+            Text(title).font(.system(size: 13, weight: .semibold))
+            Text(detail).font(.system(size: 11.5)).foregroundStyle(.secondary).multilineTextAlignment(.center)
+        }
+        .padding(24)
+    }
+}
+
 private struct Footer: View {
     @ObservedObject var state: AppState
 
@@ -314,7 +357,9 @@ private struct Footer: View {
             } else if !state.queue.isEmpty {
                 Text("\(state.queue.count) queued · ⌃⌘V pastes next").foregroundStyle(accent)
             } else {
-                Text("\(state.total) items").foregroundStyle(.secondary)
+                let filtered = state.filter != .all || !state.query.isEmpty
+                Text(filtered ? "\(state.clips.count) of \(state.total) items" : "\(state.total) items")
+                    .foregroundStyle(.secondary).monospacedDigit()
             }
         }
         .font(.system(size: 11))

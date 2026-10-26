@@ -32,8 +32,9 @@ final class AppState: ObservableObject {
 
     func reload() {
         now = Date()
-        clips = (try? store.clips(filter: filter, search: query)) ?? []
-        total = (try? store.count()) ?? 0
+        let hidden = pendingDelete?.id
+        clips = ((try? store.clips(filter: filter, search: query)) ?? []).filter { $0.id != hidden }
+        total = ((try? store.count()) ?? 0) - (hidden == nil ? 0 : 1)
         if selected == nil { selectedID = clips.first?.id }
     }
 
@@ -108,12 +109,31 @@ final class AppState: ObservableObject {
         reload()
     }
 
+    /// Deletes are held back until the panel closes (or the next delete) so ⌘Z can bring the clip back.
+    private var pendingDelete: Clip?
+
     func delete(_ clip: Clip) {
+        commitDelete()
         let i = clips.firstIndex(of: clip) ?? 0
-        try? store.delete(clip.id)
-        queue.removeAll { $0 == clip.id }
+        pendingDelete = clip
         reload()
         if !clips.isEmpty { selectedID = clips[min(i, clips.count - 1)].id }
+        flash("Deleted · ⌘Z to undo")
+    }
+
+    func undoDelete() {
+        guard let clip = pendingDelete else { return NSSound.beep() }
+        pendingDelete = nil
+        reload()
+        selectedID = clip.id
+        flash("Restored")
+    }
+
+    func commitDelete() {
+        guard let clip = pendingDelete else { return }
+        pendingDelete = nil
+        try? store.delete(clip.id)
+        queue.removeAll { $0 == clip.id }
     }
 
     func saveImage(_ clip: Clip) {
@@ -135,6 +155,7 @@ final class AppState: ObservableObject {
     }
 
     func clearHistory() {
+        commitDelete()
         try? store.clearUnpinned()
         queue.removeAll { (try? store.clip(id: $0)) == nil }
         reload()

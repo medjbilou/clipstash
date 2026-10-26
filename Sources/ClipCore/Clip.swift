@@ -44,7 +44,8 @@ public struct Clip: Identifiable, Equatable, Sendable {
         case .image:
             return text ?? "Image"
         default:
-            let line = (text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            // Only the head matters for a one-line label; trimming a multi-MB clip on every render is not free.
+            let line = (text ?? "").prefix(2000).trimmingCharacters(in: .whitespacesAndNewlines)
                 .split(separator: "\n", maxSplits: 1).first.map(String.init) ?? ""
             return String(line.prefix(200))
         }

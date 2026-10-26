@@ -46,6 +46,7 @@ final class PanelController: NSObject, NSWindowDelegate {
     func show() {
         state.previousApp = NSWorkspace.shared.frontmostApplication
         state.query = ""
+        state.filter = .all
         state.reload()
         state.selectedID = state.clips.first?.id
         let mouse = NSEvent.mouseLocation
@@ -60,6 +61,7 @@ final class PanelController: NSObject, NSWindowDelegate {
 
     func hide() {
         state.isRenaming = false
+        state.commitDelete()
         panel.orderOut(nil)
     }
 
@@ -71,7 +73,7 @@ final class PanelController: NSObject, NSWindowDelegate {
         let shift = e.modifierFlags.contains(.shift)
         let key = Int(e.keyCode)
         if key == kVK_Escape {
-            if state.isRenaming { state.openToken += 1 } else { hide() }
+            if state.isRenaming { state.openToken += 1 } else if !state.query.isEmpty { state.query = "" } else { hide() }
             return true
         }
         if state.isRenaming { return false }
@@ -93,6 +95,7 @@ final class PanelController: NSObject, NSWindowDelegate {
             case "r": if clip != nil { state.renameToken += 1 }
             case "s": if let clip, clip.kind == .image { state.saveImage(clip) }
             case ",": state.openSettings()
+            case "z" where !shift: state.undoDelete()
             case "1", "2", "3", "4", "5", "6", "7": state.filter = ClipFilter.allCases[Int(ch)! - 1]
             default: return false
             }
