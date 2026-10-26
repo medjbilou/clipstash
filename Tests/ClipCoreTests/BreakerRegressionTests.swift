@@ -111,3 +111,47 @@ import Testing
         #expect(try reopened.clips(search: "creme").count == 1)
     }
 }
+
+/// Re-run finding: folding one long accented string was super-linear and hung migration at launch.
+@Suite struct FoldPerformanceTests {
+    @Test func foldingLongAccentedTextIsLinear() {
+        let text = String(repeating: "Crème brûlée à la française, déjà vu. ", count: 25_000) // ~1 MB
+        let t = Date()
+        let folded = Store.fold(text)
+        #expect(Date().timeIntervalSince(t) < 1)
+        #expect(folded.hasPrefix("creme brulee a la francaise"))
+    }
+    /// Re-run High: `ß`, ligatures and decomposed accents made folding quadratic (1 MB took 2.5 s).
+    @Test(arguments: ["Straße ", "ﬁle ", "ŉ x ", "E\u{0301}clair Cafe\u{0301} "])
+    func foldingExpandingTextIsLinear(unit: String) {
+        let text = String(repeating: unit, count: 2_000_000 / unit.utf8.count) // ~2 MB
+        let t = Date()
+        _ = Store.fold(text)
+        #expect(Date().timeIntervalSince(t) < 0.3, "\(unit)")
+    }
+
+    @Test func searchFindsTextNearTheStartOfHugeClips() throws {
+        let s = try Store(directory: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString))
+        try s.add(kind: .text, text: "Straße head " + String(repeating: "Straße ", count: 600_000), app: nil, bundle: nil)
+        #expect(try s.clips(search: "strasse head").count == 1)
+    }
+
+    /// Re-run Low: `Set(...).prefix(64)` kept a random 64 words, so the same query could change results.
+    @Test func longQueriesAreDeterministic() throws {
+        let s = try Store(directory: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString))
+        let words = (0..<70).map { "w\($0)" }
+        try s.add(kind: .text, text: words.prefix(64).joined(separator: " "), app: nil, bundle: nil)
+        #expect(try s.clips(search: words.joined(separator: " ")).count == 1) // first 64 words, in order
+    }
+
+    /// Re-run Low: two recoveries in the same second collided on the backup name.
+    @Test func twoRecoveriesInOneSecondBothSucceed() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        for _ in 0..<2 {
+            try Data(repeating: 0xAB, count: 8192).write(to: dir.appendingPathComponent("history.sqlite"))
+            let (_, moved) = try Store.openRecovering(directory: dir)
+            #expect(moved != nil)
+        }
+    }
+}

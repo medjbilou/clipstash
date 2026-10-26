@@ -48,7 +48,7 @@ public final class Store: @unchecked Sendable {
             try exec("ALTER TABLE clips ADD COLUMN search TEXT")
         }
         let missing = try query("SELECT id, text, title, app FROM clips WHERE search IS NULL") {
-            (sqlite3_column_int64($0, 0), Self.fold(col($0, 1), col($0, 2), col($0, 3)))
+            (sqlite3_column_int64($0, 0), Self.fold(col($0, 1), title: col($0, 2), app: col($0, 3)))
         }
         guard !missing.isEmpty else { return }
         try exec("BEGIN")
@@ -61,8 +61,25 @@ public final class Store: @unchecked Sendable {
         }
     }
 
-    static func fold(_ parts: String?...) -> String {
-        parts.compactMap { $0 }.joined(separator: "\n").folding(options: [.caseInsensitive, .diacriticInsensitive], locale: nil)
+    /// Source bytes folded into `search`. shortcut: text past the first 1 MB of a clip is not searchable;
+    /// raise it (or move to FTS5) if users search deep inside huge logs.
+    static let searchLimit = 1 << 20
+
+    /// Title and app come first so they stay searchable when a huge text hits `searchLimit`.
+    static func fold(_ text: String?, title: String? = nil, app: String? = nil) -> String {
+        let source = [title, app, text].compactMap { $0 }.joined(separator: "\n")
+        // Folded in small pieces: one call on a long string with ß, ligatures or decomposed accents is quadratic.
+        var out = ""
+        var i = source.startIndex
+        var budget = searchLimit
+        while i < source.endIndex, budget > 0 {
+            let j = source.index(i, offsetBy: 2048, limitedBy: source.endIndex) ?? source.endIndex
+            let piece = source[i..<j]
+            out += piece.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: nil)
+            budget -= piece.utf8.count
+            i = j
+        }
+        return out
     }
 
     deinit { sqlite3_close_v2(db) }
@@ -74,7 +91,7 @@ public final class Store: @unchecked Sendable {
         } catch let error as StoreError where error.code == SQLITE_CORRUPT || error.code == SQLITE_NOTADB {
             let stamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "-")
             let fm = FileManager.default
-            let dest = directory.appendingPathComponent("history.corrupt-\(stamp).sqlite")
+            let dest = directory.appendingPathComponent("history.corrupt-\(stamp)-\(UUID().uuidString.prefix(8)).sqlite")
             for suffix in ["", "-wal", "-shm"] {
                 let src = directory.appendingPathComponent("history.sqlite" + suffix)
                 if fm.fileExists(atPath: src.path) {
@@ -115,10 +132,10 @@ public final class Store: @unchecked Sendable {
                 expires=CASE WHEN clips.pinned=1 THEN NULL ELSE excluded.expires END,
                 search=excluded.search
             """, kind.rawValue, text, image, app, bundle, now.timeIntervalSince1970,
-            expires?.timeIntervalSince1970, size, hash, Self.fold(text, nil, app))
+            expires?.timeIntervalSince1970, size, hash, Self.fold(text, app: app))
         let row = try query("SELECT id, title FROM clips WHERE hash=?", hash) { (sqlite3_column_int64($0, 0), col($0, 1)) }.first
         // A re-copy of a renamed clip keeps its name searchable.
-        if case let (id, title?)? = row { try run("UPDATE clips SET search=? WHERE id=?", Self.fold(text, title, app), id) }
+        if case let (id, title?)? = row { try run("UPDATE clips SET search=? WHERE id=?", Self.fold(text, title: title, app: app), id) }
         return row?.0 ?? 0
     }
 
@@ -137,7 +154,7 @@ public final class Store: @unchecked Sendable {
         let clean = (t?.isEmpty ?? true) ? nil : t
         guard let clip = try clip(id: id) else { return }
         try run("UPDATE clips SET title=?, search=? WHERE id=?", clean,
-                Self.fold(clip.text, clean, clip.app), id)
+                Self.fold(clip.text, title: clean, app: clip.app), id)
     }
 
     public func setExpiry(_ id: Int64, _ date: Date?) throws {
@@ -183,7 +200,9 @@ public final class Store: @unchecked Sendable {
         if filter == .favorites { sql += " AND pinned=1" }
         if let kind = filter.kind { sql += " AND kind=?"; args.append(kind.rawValue) }
         // instr, not LIKE: no wildcard escaping, and it compares by byte length so text after a NUL is searchable.
-        for word in Set(Self.fold(search).split(whereSeparator: \.isWhitespace)).prefix(64) {
+        var seen = Set<Substring>()
+        let words = Self.fold(search).split(whereSeparator: \.isWhitespace).filter { seen.insert($0).inserted }
+        for word in words.prefix(64) { // ordered, so the same query always uses the same words
             sql += " AND instr(search, ?) > 0"
             args.append(String(word))
         }
