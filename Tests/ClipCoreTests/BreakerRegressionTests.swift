@@ -2,7 +2,7 @@ import Foundation
 import Testing
 @testable import ClipCore
 
-/// One test per Breaker finding (breaker-report.md). Each failed before its fix.
+/// One test per finding from adversarial ("breaker") testing. Each failed before its fix.
 @Suite struct BreakerRegressionTests {
     func tempDir() -> URL { FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString) }
 
