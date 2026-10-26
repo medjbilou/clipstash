@@ -30,8 +30,10 @@ import Testing
     @Test func hugeClipStaysCheap() throws {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         let store = try Store(directory: dir)
-        try store.add(kind: .text, text: "  first line\n" + String(repeating: "x", count: 20_000_000), app: nil, bundle: nil)
         var t = Date()
+        try store.add(kind: .text, text: "  first line\n" + String(repeating: "x", count: 20_000_000), app: nil, bundle: nil)
+        print("PERF huge add=\(String(format: "%.0f", Date().timeIntervalSince(t) * 1000))ms")
+        t = Date()
         let clips = try store.clips()
         let load = Date().timeIntervalSince(t) * 1000
         t = Date()

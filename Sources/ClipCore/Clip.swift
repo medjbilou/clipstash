@@ -80,8 +80,10 @@ public enum Classifier {
     ]
 
     public static func kind(for text: String, bundle: String?) -> ClipKind {
-        let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        if isLink(t) { return .link }
+        // Look at the head only: full scans of a multi-MB clip took ~0.85 s/MB and stalled capture.
+        let head = text.utf8.count > 16_384 ? String(text.prefix(4096)) : text
+        let t = head.trimmingCharacters(in: .whitespacesAndNewlines)
+        if head.utf8.count == text.utf8.count, isLink(t) { return .link }
         if let bundle, codeApps.contains(bundle) || bundle.hasPrefix("com.jetbrains.") { return .code }
         return looksLikeCode(t) ? .code : .text
     }
@@ -108,6 +110,7 @@ public enum Classifier {
     }
 
     public static func hexColor(_ text: String) -> (r: Double, g: Double, b: Double)? {
+        guard text.utf8.count <= 32 else { return nil } // runs on every row render
         let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard t.hasPrefix("#") else { return nil }
         var hex = String(t.dropFirst())
@@ -117,10 +120,11 @@ public enum Classifier {
         return (Double((v >> 16) & 0xFF) / 255, Double((v >> 8) & 0xFF) / 255, Double(v & 0xFF) / 255)
     }
 
-    /// 6-8 digit codes, optionally split once by a space or dash ("482 913", "123-456").
+    /// Exactly 6 ASCII digits, optionally split 3+3 ("482913", "482 913", "482-913"): the standard 2FA shape.
+    /// Wider rules caught phone, card and invoice numbers and silently deleted them after 5 minutes.
     public static func isOneTimeCode(_ text: String) -> Bool {
+        guard text.utf8.count <= 16 else { return false }
         let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        return t.range(of: #"^\d{3,4}[ -]?\d{3,4}$"#, options: .regularExpression) != nil
-            && t.filter(\.isNumber).count >= 6
+        return t.range(of: #"^[0-9]{3}[ -]?[0-9]{3}$"#, options: .regularExpression) != nil
     }
 }

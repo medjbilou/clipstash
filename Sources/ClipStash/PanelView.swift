@@ -204,7 +204,11 @@ private struct DetailView: View {
                 HStack {
                     Label("Delete after", systemImage: "timer").font(.system(size: 11)).foregroundStyle(.secondary)
                     Spacer()
-                    ExpiryPicker(state: state, clip: clip)
+                    if clip.pinned {
+                        Text("Pinned clips are kept").font(.system(size: 11)).foregroundStyle(.tertiary)
+                    } else {
+                        ExpiryPicker(state: state, clip: clip)
+                    }
                 }
                 actions
             }
@@ -354,6 +358,9 @@ private struct Footer: View {
             Spacer()
             if let toast = state.toast {
                 Text(toast).foregroundStyle(accent).transition(.opacity)
+            } else if let error = state.saveError {
+                Label("Last copy not saved: \(error)", systemImage: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.orange).lineLimit(1).truncationMode(.tail).help(error)
             } else if !state.queue.isEmpty {
                 Text("\(state.queue.count) queued · ⌃⌘V pastes next").foregroundStyle(accent)
             } else {

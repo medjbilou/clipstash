@@ -2,3 +2,6 @@
 dist/
 *.app
 .DS_Store
+breaker-backup/
+breaker-scratch/
+breaker-report.md

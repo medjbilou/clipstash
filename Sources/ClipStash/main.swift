@@ -28,7 +28,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             .appendingPathComponent("ClipStash", isDirectory: true)
         let store: Store
         do {
-            store = try Store(directory: dir)
+            let (opened, movedTo) = try Store.openRecovering(directory: dir)
+            store = opened
+            if let movedTo {
+                let alert = NSAlert()
+                alert.messageText = "ClipStash's history was damaged"
+                alert.informativeText = "It was moved aside and a fresh history started. The old file is kept here:\n\(movedTo.path)"
+                alert.runModal()
+            }
         } catch {
             let alert = NSAlert()
             alert.messageText = "ClipStash can't open its history"
@@ -40,7 +47,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         state = AppState(store: store)
         state.openSettings = { [weak self] in self?.showSettings() }
-        monitor = ClipboardMonitor(store: store) { [weak self] in self?.state.reload() }
+        monitor = ClipboardMonitor(store: store) { [weak self] error in
+            self?.state.saveError = error
+            self?.state.reload()
+        }
         state.monitor = monitor
         monitor.start()
         panel = PanelController(state: state)
@@ -104,6 +114,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     func menuNeedsUpdate(_ menu: NSMenu) {
         menu.removeAllItems()
+        if let error = state.saveError {
+            menu.addItem(withTitle: "⚠︎ Last copy not saved: \(error)", action: nil, keyEquivalent: "")
+            menu.addItem(.separator())
+        }
         let open = NSMenuItem(title: "Open History  \(Prefs.hotKey.label)", action: #selector(openHistory), keyEquivalent: "")
         menu.addItem(open)
         if !state.queue.isEmpty {

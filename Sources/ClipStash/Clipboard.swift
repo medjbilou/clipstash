@@ -13,29 +13,41 @@ final class ClipboardMonitor {
 
     private let pasteboard = NSPasteboard.general
     private let store: Store
-    private let onSaved: () -> Void
+    /// Called on main after each save attempt: nil on success, the error text on failure.
+    private let onSaved: (String?) -> Void
     private let work = DispatchQueue(label: "clipstash.capture", qos: .utility)
     private var lastChange: Int
     private var timer: Timer?
+    private var fastUntil = Date.distantPast
+    private static let idleInterval = 0.5, burstInterval = 0.1
 
-    init(store: Store, onSaved: @escaping () -> Void) {
+    init(store: Store, onSaved: @escaping (String?) -> Void) {
         self.store = store
         self.onSaved = onSaved
         lastChange = pasteboard.changeCount
     }
 
-    func start() {
-        // NSPasteboard has no change notification; polling changeCount is the standard, cheap approach.
-        timer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in self?.poll() }
-        timer?.tolerance = 0.2
+    func start() { schedule(Self.idleInterval) }
+
+    // NSPasteboard has no change notification; polling changeCount is the standard, cheap approach.
+    // Idle polls stay slow; right after a copy it polls fast for a few seconds so copy-copy-copy bursts are not missed.
+    private func schedule(_ interval: TimeInterval) {
+        timer?.invalidate()
+        timer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in self?.poll() }
+        timer?.tolerance = interval * 0.2
     }
 
     /// Call right after writing to the pasteboard ourselves so the write is not re-captured.
     func ignoreCurrent() { lastChange = pasteboard.changeCount }
 
     private func poll() {
-        guard pasteboard.changeCount != lastChange else { return }
+        guard pasteboard.changeCount != lastChange else {
+            if timer?.timeInterval == Self.burstInterval, Date() > fastUntil { schedule(Self.idleInterval) }
+            return
+        }
         lastChange = pasteboard.changeCount
+        fastUntil = Date().addingTimeInterval(3)
+        if timer?.timeInterval != Self.burstInterval { schedule(Self.burstInterval) }
         guard !Prefs.paused else { return }
         let types = Set(pasteboard.types?.map(\.rawValue) ?? [])
         guard !types.isEmpty, types.isDisjoint(with: Self.skipTypes) else { return }
@@ -67,13 +79,15 @@ final class ClipboardMonitor {
     private func save(_ body: @escaping (Store) throws -> Void) {
         let maxClips = Prefs.maxClips, maxBytes = Prefs.storageBytes
         work.async { [store, onSaved] in
+            var failure: String?
             do {
                 try body(store)
                 try store.prune(maxClips: maxClips, maxImageBytes: maxBytes)
             } catch {
                 NSLog("ClipStash: save failed: \(error)")
+                failure = "\(error)"
             }
-            DispatchQueue.main.async(execute: onSaved)
+            DispatchQueue.main.async { onSaved(failure) }
         }
     }
 

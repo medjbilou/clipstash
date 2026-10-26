@@ -13,6 +13,8 @@ final class AppState: ObservableObject {
     @Published var queue: [Int64] = []
     @Published var now = Date()
     @Published var toast: String?
+    /// Last capture failure (disk full, read-only folder…); shown until a save succeeds.
+    @Published var saveError: String?
     /// Bumped each time the panel opens so the view refocuses search.
     @Published var openToken = 0
     /// Bumped to move focus into the rename field.

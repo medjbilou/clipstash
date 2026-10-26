@@ -17,6 +17,7 @@ public final class Store: @unchecked Sendable {
             throw StoreError(message: db.map { String(cString: sqlite3_errmsg($0)) } ?? "open failed")
         }
         try exec("""
+            PRAGMA busy_timeout=3000;
             PRAGMA journal_mode=WAL;
             PRAGMA synchronous=NORMAL;
             CREATE TABLE IF NOT EXISTS clips(
@@ -34,9 +35,55 @@ public final class Store: @unchecked Sendable {
                 hash TEXT NOT NULL UNIQUE);
             CREATE INDEX IF NOT EXISTS clips_created ON clips(created DESC);
             """)
+        // Catches damage in the middle of the file, which opening alone does not notice.
+        guard try query("PRAGMA quick_check", row: { col($0, 0) }) == ["ok"] else {
+            throw StoreError(message: "database disk image is malformed", code: SQLITE_CORRUPT)
+        }
+        try migrateSearchColumn()
+    }
+
+    /// `search` holds case- and accent-folded text, title and app, so "cafe" finds "Café".
+    private func migrateSearchColumn() throws {
+        if try !query("PRAGMA table_info(clips)", row: { col($0, 1) }).contains("search") {
+            try exec("ALTER TABLE clips ADD COLUMN search TEXT")
+        }
+        let missing = try query("SELECT id, text, title, app FROM clips WHERE search IS NULL") {
+            (sqlite3_column_int64($0, 0), Self.fold(col($0, 1), col($0, 2), col($0, 3)))
+        }
+        guard !missing.isEmpty else { return }
+        try exec("BEGIN")
+        do {
+            for (id, folded) in missing { try run("UPDATE clips SET search=? WHERE id=?", folded, id) }
+            try exec("COMMIT")
+        } catch {
+            try? exec("ROLLBACK")
+            throw error
+        }
+    }
+
+    static func fold(_ parts: String?...) -> String {
+        parts.compactMap { $0 }.joined(separator: "\n").folding(options: [.caseInsensitive, .diacriticInsensitive], locale: nil)
     }
 
     deinit { sqlite3_close_v2(db) }
+
+    /// Opens the store; if the database is corrupt, moves it aside (kept for manual recovery) and starts fresh.
+    public static func openRecovering(directory: URL) throws -> (Store, movedTo: URL?) {
+        do {
+            return (try Store(directory: directory), nil)
+        } catch let error as StoreError where error.code == SQLITE_CORRUPT || error.code == SQLITE_NOTADB {
+            let stamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "-")
+            let fm = FileManager.default
+            let dest = directory.appendingPathComponent("history.corrupt-\(stamp).sqlite")
+            for suffix in ["", "-wal", "-shm"] {
+                let src = directory.appendingPathComponent("history.sqlite" + suffix)
+                if fm.fileExists(atPath: src.path) {
+                    try fm.moveItem(at: src, to: URL(fileURLWithPath: dest.path + suffix))
+                }
+            }
+            return (try Store(directory: directory), dest)
+        }
+    }
 
     public static func hash(_ data: Data) -> String {
         SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
@@ -54,34 +101,47 @@ public final class Store: @unchecked Sendable {
         if let png {
             image = hash + ".png"
             let url = imageDir.appendingPathComponent(image!)
-            if !FileManager.default.fileExists(atPath: url.path) { try png.write(to: url, options: .atomic) }
+            if !FileManager.default.fileExists(atPath: url.path) {
+                // Recreated here too: the folder can be deleted while the app runs.
+                try FileManager.default.createDirectory(at: imageDir, withIntermediateDirectories: true)
+                try png.write(to: url, options: .atomic)
+            }
         }
         let size = png?.count ?? (kind == .file ? fileSize(text ?? "") : (text ?? "").utf8.count)
         try run("""
-            INSERT INTO clips(kind, text, image, app, bundle, created, expires, size, hash)
-            VALUES(?,?,?,?,?,?,?,?,?)
+            INSERT INTO clips(kind, text, image, app, bundle, created, expires, size, hash, search)
+            VALUES(?,?,?,?,?,?,?,?,?,?)
             ON CONFLICT(hash) DO UPDATE SET created=excluded.created, app=excluded.app, bundle=excluded.bundle,
-                expires=COALESCE(clips.expires, excluded.expires)
+                expires=CASE WHEN clips.pinned=1 THEN NULL ELSE excluded.expires END,
+                search=excluded.search
             """, kind.rawValue, text, image, app, bundle, now.timeIntervalSince1970,
-            expires?.timeIntervalSince1970, size, hash)
-        return try query("SELECT id FROM clips WHERE hash=?", hash) { sqlite3_column_int64($0, 0) }.first ?? 0
+            expires?.timeIntervalSince1970, size, hash, Self.fold(text, nil, app))
+        let row = try query("SELECT id, title FROM clips WHERE hash=?", hash) { (sqlite3_column_int64($0, 0), col($0, 1)) }.first
+        // A re-copy of a renamed clip keeps its name searchable.
+        if case let (id, title?)? = row { try run("UPDATE clips SET search=? WHERE id=?", Self.fold(text, title, app), id) }
+        return row?.0 ?? 0
     }
 
     public func touch(_ id: Int64, now: Date = Date()) throws {
         try run("UPDATE clips SET created=? WHERE id=?", now.timeIntervalSince1970, id)
     }
 
+    /// Pinned clips are kept forever, so pinning also drops any delete timer.
     public func setPinned(_ id: Int64, _ pinned: Bool) throws {
-        try run("UPDATE clips SET pinned=? WHERE id=?", pinned ? 1 : 0, id)
+        try run("UPDATE clips SET pinned=?, expires=CASE WHEN ?=1 THEN NULL ELSE expires END WHERE id=?",
+                pinned ? 1 : 0, pinned ? 1 : 0, id)
     }
 
     public func setTitle(_ id: Int64, _ title: String?) throws {
         let t = title?.trimmingCharacters(in: .whitespacesAndNewlines)
-        try run("UPDATE clips SET title=? WHERE id=?", (t?.isEmpty ?? true) ? nil : t, id)
+        let clean = (t?.isEmpty ?? true) ? nil : t
+        guard let clip = try clip(id: id) else { return }
+        try run("UPDATE clips SET title=?, search=? WHERE id=?", clean,
+                Self.fold(clip.text, clean, clip.app), id)
     }
 
     public func setExpiry(_ id: Int64, _ date: Date?) throws {
-        try run("UPDATE clips SET expires=? WHERE id=?", date?.timeIntervalSince1970, id)
+        try run("UPDATE clips SET expires=? WHERE id=? AND pinned=0", date?.timeIntervalSince1970, id)
     }
 
     public func delete(_ id: Int64) throws {
@@ -93,10 +153,10 @@ public final class Store: @unchecked Sendable {
         try deleteWhere("pinned=0")
     }
 
-    /// Removes expired clips (pinned or not: the user asked for them to go). Returns how many.
+    /// Removes expired clips. Pinned clips never expire. Returns how many.
     @discardableResult
     public func deleteExpired(now: Date = Date()) throws -> Int {
-        try deleteWhere("expires IS NOT NULL AND expires<=?", now.timeIntervalSince1970)
+        try deleteWhere("pinned=0 AND expires IS NOT NULL AND expires<=?", now.timeIntervalSince1970)
     }
 
     /// Keeps at most `maxClips` unpinned clips and at most `maxImageBytes` of unpinned images.
@@ -122,11 +182,10 @@ public final class Store: @unchecked Sendable {
         var args: [Any?] = []
         if filter == .favorites { sql += " AND pinned=1" }
         if let kind = filter.kind { sql += " AND kind=?"; args.append(kind.rawValue) }
-        for word in search.split(whereSeparator: \.isWhitespace) {
-            let like = "%" + word.replacingOccurrences(of: "\\", with: "\\\\")
-                .replacingOccurrences(of: "%", with: "\\%").replacingOccurrences(of: "_", with: "\\_") + "%"
-            sql += " AND (text LIKE ? ESCAPE '\\' OR title LIKE ? ESCAPE '\\' OR app LIKE ? ESCAPE '\\')"
-            args += [like, like, like]
+        // instr, not LIKE: no wildcard escaping, and it compares by byte length so text after a NUL is searchable.
+        for word in Set(Self.fold(search).split(whereSeparator: \.isWhitespace)).prefix(64) {
+            sql += " AND instr(search, ?) > 0"
+            args.append(String(word))
         }
         sql += " ORDER BY created DESC LIMIT ?"
         args.append(limit)
@@ -207,7 +266,8 @@ public final class Store: @unchecked Sendable {
             case let v as Int: sqlite3_bind_int64(s, idx, Int64(v))
             case let v as Int64: sqlite3_bind_int64(s, idx, v)
             case let v as Double: sqlite3_bind_double(s, idx, v)
-            case let v as String: sqlite3_bind_text(s, idx, v, -1, SQLITE_TRANSIENT)
+            // Explicit byte length: -1 would stop at the first NUL and silently cut the clip.
+            case let v as String: v.withCString { _ = sqlite3_bind_text(s, idx, $0, Int32(v.utf8.count), SQLITE_TRANSIENT) }
             default:
                 sqlite3_finalize(s)
                 throw StoreError(message: "unsupported bind type \(type(of: arg))")
@@ -216,7 +276,7 @@ public final class Store: @unchecked Sendable {
         return s
     }
 
-    private func error() -> StoreError { StoreError(message: String(cString: sqlite3_errmsg(db))) }
+    private func error() -> StoreError { StoreError(message: String(cString: sqlite3_errmsg(db)), code: sqlite3_errcode(db)) }
 
     private func fileSize(_ paths: String) -> Int {
         paths.split(separator: "\n").reduce(0) {
@@ -227,9 +287,12 @@ public final class Store: @unchecked Sendable {
 
 public struct StoreError: Error, CustomStringConvertible {
     public let message: String
+    public var code: Int32 = 0
     public var description: String { message }
 }
 
+/// Reads by byte count, not up to the first NUL.
 private func col(_ s: OpaquePointer, _ i: Int32) -> String? {
-    sqlite3_column_text(s, i).map { String(cString: $0) }
+    guard let p = sqlite3_column_text(s, i) else { return nil }
+    return String(decoding: UnsafeBufferPointer(start: p, count: Int(sqlite3_column_bytes(s, i))), as: UTF8.self)
 }

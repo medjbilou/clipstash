@@ -29,7 +29,7 @@ import Testing
     @Test func oneTimeCodes() {
         #expect(Classifier.isOneTimeCode("482 913"))
         #expect(Classifier.isOneTimeCode("123456"))
-        #expect(Classifier.isOneTimeCode("123-4567"))
+        #expect(!Classifier.isOneTimeCode("123-4567")) // 7 digits: phone-shaped, not a 2FA code
         #expect(!Classifier.isOneTimeCode("2041"))
         #expect(!Classifier.isOneTimeCode("1234567890"))
     }
